@@ -18,7 +18,6 @@ import math
 import time
 import multiprocessing as mp
 
-
 def _printer(outfile, print_queue):
     with open(outfile, "a") as f:
         while 1:
