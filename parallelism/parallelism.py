@@ -17,13 +17,40 @@
 import math
 import time
 import multiprocessing as mp
+import sys
 
-def _printer(outfile, print_queue):
-    with open(outfile, "a") as f:
-        while 1:
-            m = print_queue.get()
-            f.write(str(m))
-            f.flush()
+
+def broadcasting_wrapper(input_list, func, outqueue, printer):
+    times = []
+    sys.stdout = printer
+    for e in input_list:
+        times.append(func(**e))
+    for t in times:
+        outqueue.put(t)
+
+
+class Printer(object):
+    def __init__(self, outfile, print_queue):
+        self.outfile = outfile
+        self.print_queue = print_queue
+        self.running = True
+
+    def write(self, s):
+        if self.running:
+            self.print_queue.put(s)
+
+    def waterfall(self):
+        while self.running or self.print_queue.qsize() > 0:
+            if self.print_queue.qsize() > 0:
+                m = self.print_queue.get()
+                if self.outfile:
+                    self.outfile.write(str(m))
+                    self.outfile.flush()
+                else:
+                    print(str(m))
+
+    def close(self):
+        self.running = False
 
 
 def launch_workers(input_list, func, parallelism=4, inputs_per_worker=1000,
@@ -33,30 +60,40 @@ def launch_workers(input_list, func, parallelism=4, inputs_per_worker=1000,
     Parameters
     ----------
     input_list: list
-        List with input data for the function
+        List with input data for the function, given as a dictionary of
+        parameter values.
     func: function
-        The worker function; it has to accept as input a list and a queue.
-        The list is used to pass the actual input, a fraction of input_list, the
-        queue is the mean used by the func to return values (using queue.put())
+        The job worker, it has to accept the input_list parameter values
     parallelism: integer
-        maximum number of process to start as workers
+        Maximum number of process to start as workers
     inputs_per_worker: integer
-        number of elements of input_list to be passed to each function instance
+        Number of elements of input_list to be passed to each function instance
+    outfile:
+        Object implementing write() and flush() methods. If func prints
+        something and outfile is defined, then output is redirected to outfile.
 
     Returns
     -------
         list with all the returned values
+
+    Examples
+    --------
+    >>> import parallelism as pll
+    >>> def dummy(a):
+    ...:    return 1
+    ...:
+    >>> pll.launch_workers([dict(a=5), dict(a=3)], dummy)
+        [1, 1]
     """
     queue = mp.Queue()
     procList = []
     outList = []
     deadProc = []
-    print_queue = None
+    print_queue = mp.Queue()
 
-    if outfile:
-        print_queue = mp.Queue()
-        printer_proc = mp.Process(target=_printer, args=(outfile, print_queue))
-        printer_proc.start()
+    printer = Printer(outfile, print_queue)
+    printer_proc = mp.Process(target=printer.waterfall, args=())
+    printer_proc.start()
 
     while len(input_list):
         # if somenthing ended, collect the result
@@ -72,7 +109,8 @@ def launch_workers(input_list, func, parallelism=4, inputs_per_worker=1000,
         if len(input_list) > 0 and len(procList) < parallelism:
             feed = input_list[:inputs_per_worker]
             input_list = input_list[inputs_per_worker:]
-            p = mp.Process(target=func, args=(feed, queue, print_queue))
+            p = mp.Process(target=broadcasting_wrapper, args=(
+                feed, func, queue, printer))
             procList.append(p)
             p.start()
 
@@ -80,10 +118,9 @@ def launch_workers(input_list, func, parallelism=4, inputs_per_worker=1000,
     for p in procList:
         p.join()
 
-    if outfile:
-        time.sleep(1)
-        printer_proc.terminate()
-        printer_proc.join()
+    time.sleep(1)
+    printer_proc.terminate()
+    printer_proc.join()
 
     while not queue.empty():
         outList.append(queue.get())
